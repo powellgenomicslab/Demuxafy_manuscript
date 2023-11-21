@@ -1,0 +1,1451 @@
+#!/usr/local/envs/py36/bin python3
+
+### This Snakefile has rules to run each of the demultiplexing and doublet detecting softwares for the fibroblast dataset used in the manuscript.
+
+import os 
+import pandas as pd
+
+samples = pd.read_csv("/path/to/Demuxafy_manuscript/files/fibroblast/fibroblast_sample_meta.tsv", sep = "\t") ### path to the fibroblast_sample_meta.tsv file. The file used for the manuscript is provided on zenodo but the location of the barcodes file will have to be updated to your system in the file
+datadir = "/path/to/10x/data/dir/" ### the directory that contains all the results from cellranger for the fibroblast pools
+outdir = "/path/to/output/fibroblasts" ### the directory that all the results are written to
+demuxafy_sif = "/path/to/Demuxafy.sif" ### the path to the singularity image "Demuxafy.sif", provided on zenodo
+gtf = "/path/to/genes/genes.gtf" ### path to gtf file
+dropseq_dir = "/path/to/Drop-seq_tools-2.5.1" ### path to the dropseq directory (must be installed to run dropulation)
+tool_scripts = "/path/to/Demuxafy_manuscript/tool_scripts/" ### path to the tool_scripts directory containing scripts tool-specific scripts
+SNP_GENOTYPES = "/path/to/Demuxafy_manuscript/files/fibroblast/genotypes.vcf" ### vcf file that contains the snp genotypes for each fibroblast line in the experiment. This contains variants just overlapping annotated gene locations
+FASTA = "/path/to/genome/reference/genome.fa" ### path to reference fasta file
+FAI = "/path/to/genome/reference/genome.fa.fai" ### path to reference fasta index file
+configfile: "config.yaml" ### configuration file to indicate the scrublet gene expression percentile and the rhop values for doublet decon, provided on zenodo and github
+
+
+
+### DoubletDecon is run for multiple rhop values so that the best one for each pool can be determined. 
+### Following running each rhop value, the best is selected and the selected rhop is included in the DoubletDecon_rhops.tsv to use for downstream comparisons. 
+### The DoubletDecon_rhops.tsv used for the paper is provided on zenodo
+# If the DoubletDetection rhop selection is present => all the contents are there that are needed to move past 
+DoubletDecon_rhops = []
+if os.path.exists(outdir + "/DoubletDecon_rhops.tsv"):
+    DoubletDecon_decisions = pd.read_csv(outdir + "/DoubletDecon_rhops.tsv", sep = "\t", dtype = {'Pool': str,"rhop": str})
+    DoubletDecon_rhops.append(expand(outdir + "/{pool}/CombinedResults/DoubletDecon_temp.txt", pool=samples.Pool))
+
+### scrublet is run for multiple pctl gene expression values so that the best one for each pool can be determined. 
+### Following running each pctl value, the best is selected and the selected is included in the scrublet_pctl.tsv to use for downstream comparisons. 
+### The scrublet_pctl.tsv used for the paper is provided on zenodo 
+
+### Also use the scrublet_fix.tsv file to indicate pools where the scrublet-selected threshold was not appropriate and to indicate a more appropriate threshold.
+### The scrublet_fix.tsv used for the paper is provided on zenodo 
+
+# If the scrublet output is present => all the contents are there that are needed to move past 
+scrublet_rules = []
+scrublet_fix_df = None
+if os.path.exists(outdir + "/scrublet_pctl.tsv"):
+    scrublet_decisions = pd.read_csv(outdir + "/scrublet_pctl.tsv", sep = "\t", dtype = {'Pool': str,"Percentile": str})
+if os.path.exists(outdir + "/scrublet_fix.tsv"):
+    scrublet_fix_df = pd.read_csv(outdir + "/scrublet_fix.tsv", sep = "\t", dtype = {'Pool': str,"Percentile": str})
+
+if os.path.exists(outdir + "/scrublet_pctl.tsv"):
+    scrublet_rules.append(expand(outdir + "/{pool}/CombinedResults/scrublet_temp.txt", pool=scrublet_decisions.Pool))
+elif os.path.exists(outdir + "/scrublet_fix.tsv"):
+    scrublet_rules.append(expand(outdir + "/{scrub_fix_pool}/scrublet_{fix_pctl}/scrublet_results.txt", zip, scrub_fix_pool=scrublet_fix_df["Pool"], fix_pctl=scrublet_fix_df.Percentile))
+else:
+    scrublet_rules.append(expand(outdir + "/{pool}/scrublet_{pctl}/scrublet_results.txt", pool=samples.Pool, pctl=config["percentile"]))
+
+
+### rules to run depending on the situation
+
+all_rules = []
+if os.path.exists(outdir + "/scrublet_pctl.tsv") and os.path.exists(outdir + "/DoubletDecon_rhops.tsv"):
+    all_rules.append(expand(outdir +  "/{pool}/CombinedResults/CombinedDropletAssignments.tsv", pool=samples.Pool))
+else:
+    all_rules.append(expand(outdir + "/{pool}/CombinedResults/demuxlet_temp.txt", pool=samples.Pool))
+    all_rules.append(expand(outdir + "/{pool}/CombinedResults/freemuxlet_temp.txt", pool=samples.Pool))
+    all_rules.append(expand(outdir + "/{pool}/CombinedResults/scSplit_temp.txt", pool=samples.Pool))
+    all_rules.append(expand(outdir + "/{pool}/CombinedResults/souporcell_temp.txt", pool=samples.Pool))
+    all_rules.append(expand(outdir + "/{pool}/CombinedResults/vireo_temp.txt", pool=samples.Pool))
+    all_rules.append(expand(outdir + "/{pool}/DoubletDecon_rhop{rhop}/Final_doublets_groups_DoubletDecon_results.txt", pool=samples.Pool, rhop=config["rhop"]))
+    all_rules.append(expand(outdir + "/{pool}/CombinedResults/scds_temp.txt", pool=samples.Pool))
+    all_rules.append(expand(outdir + "/{pool}/CombinedResults/DoubletDetection_temp.txt", pool=samples.Pool))
+    all_rules.append(expand(outdir + "/{pool}/CombinedResults/DoubletFinder_temp.txt", pool=samples.Pool))
+    all_rules.append(expand(outdir + "/{pool}/CombinedResults/solo_results_temp.txt", pool=samples.Pool))
+    all_rules.append(expand(outdir + "/{pool}/CombinedResults/scDblFinder_results_temp.txt", pool=samples.Pool))
+    all_rules.append(expand(outdir + "/{pool}/dropulation/assignments.tsv.gz", pool=samples.Pool))
+    all_rules.append(expand(outdir + "/{pool}/demuxalot/assignments_refined.tsv.gz", pool=samples.Pool))
+    all_rules.append(expand(outdir + "/{pool}/solo/",pool=samples.Pool))
+
+
+### Calculate the number of doublets based on 10x doublet estimations
+def get_expected_Ndoublet(pool):
+    if pool.endswith(".gz"):
+        lines_in_file = gzip.open(pool, 'r').readlines()
+        number_of_doublets = int(((len(lines_in_file)**2)*0.008)/1000)
+    else:
+        lines_in_file = open(pool, 'r').readlines()
+        number_of_doublets = int(((len(lines_in_file)**2)*0.008)/1000)
+    return(number_of_doublets)
+
+
+number_doublets = [get_expected_Ndoublet(pool) for pool in samples.Barcodes]
+
+samples['Doublets'] = number_doublets
+
+
+if scrublet_fix_df is not None:
+    wildcard_constraints:
+        pool= '|'.join([re.escape(x) for x in samples.Pool]),
+        scrub_fix_pool = '|'.join([re.escape(x) for x in scrublet_fix_df.Pool]),
+        fix_pctl = '|'.join([re.escape(x) for x in scrublet_fix_df.Percentile])
+
+rule all:
+    input:
+        DoubletDecon_rhops,
+        scrublet_rules,
+        all_rules,
+
+
+
+###################################
+############# SCSPLIT #############
+###################################
+rule scSplit_sam_header:
+    input:
+        bam=datadir + "/{pool}_V1/outs/possorted_genome_bam.bam"
+    threads: 8
+    output:
+        header = temp(outdir + "/{pool}/scSplit/SAM_header"),
+        benchmark = outdir + "/benchmarks/{pool}.scSplit_sam_header_qstat.txt"
+    resources:
+        mem_per_thread_gb=1,
+        disk_per_thread_gb=1
+    benchmark:
+        outdir + "/benchmarks/{pool}.scSplit_sam_header.txt"
+    params:
+        sif=demuxafy_sif
+    group: "scSplit"
+    shell:
+        """
+        singularity exec {params.sif} samtools view -@ {threads} -H {input.bam} > {output.header}
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+rule scSplit_sam_body:
+    input:
+        bam=datadir + "/{pool}_V1/outs/possorted_genome_bam.bam",
+        barcodes=lambda wildcards: samples.Barcodes[samples.Pool == wildcards.pool].iloc[0]
+    threads: 8
+    resources:
+        mem_per_thread_gb=1,
+        disk_per_thread_gb=1
+    output:
+        body = temp(outdir + "/{pool}/scSplit/filtered_SAM_body"),
+        benchmark = outdir + "/benchmarks/{pool}.scSplit_sam_body_qstat.txt"
+    benchmark:
+        outdir + "/benchmarks/{pool}.scSplit_sam_body.txt"
+    params:
+        sif=demuxafy_sif
+    group: "scSplit"
+    shell:
+        """
+        singularity exec {params.sif} samtools view -@ {threads} -S -q 10 -F 3844 {input.bam} | LC_ALL=C grep -F -f {input.barcodes} > {output.body}
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+rule scSplit_sam_combine:
+    input:
+        header=outdir + "/{pool}/scSplit/SAM_header",
+        body=outdir + "/{pool}/scSplit/filtered_SAM_body"
+    threads: 8
+    resources:
+        mem_per_thread_gb=1,
+        disk_per_thread_gb=1
+    benchmark:
+        outdir + "/benchmarks/{pool}.scSplit_sam_combine.txt"
+    params:
+        sif=demuxafy_sif
+    group: "scSplit"
+    output:
+        bam = temp(outdir + "/{pool}/scSplit/filtered.bam"),
+        benchmark = outdir + "/benchmarks/{pool}.scSplit_sam_combine_qstat.txt"
+    shell:
+        """
+        singularity exec {params.sif} cat {input.header} {input.body} | singularity exec {params.sif} samtools view -@ {threads} -b - > {output.bam}
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+rule scSplit_rmdupe:
+    input:
+        bam=outdir + "/{pool}/scSplit/filtered.bam"
+    output:
+        bam = temp(outdir + "/{pool}/scSplit/dedup_filtered.bam"),
+        benchmark = outdir + "/benchmarks/{pool}.scSplit_rmdupe_qstat.txt"
+    resources:
+        mem_per_thread_gb=20,
+        disk_per_thread_gb=20
+    threads: 1
+    benchmark:
+        outdir + "/benchmarks/{pool}.scSplit_rmdupe.txt"
+    params:
+        sif=demuxafy_sif
+    group: "scSplit"
+    shell:
+        """
+        singularity exec {params.sif} samtools rmdup {input.bam} {output.bam}
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+rule scSplit_sort:
+    input:
+        outdir + "/{pool}/scSplit/dedup_filtered.bam"
+    threads: 8
+    resources:
+        mem_per_thread_gb=15,
+        disk_per_thread_gb=15
+    output:
+        bam = outdir + "/{pool}/scSplit/possort_dedup_filtered.bam",
+        benchmark = outdir + "/benchmarks/{pool}.scSplit_sort_qstat.txt"
+    benchmark:
+        outdir + "/benchmarks/{pool}.scSplit_sort.txt"
+    params:
+        sif=demuxafy_sif
+    group: "scSplit"
+    shell:
+        """
+        singularity exec {params.sif} samtools sort -@ {threads} -o {output.bam} {input}
+        singularity exec {params.sif} samtools index {output.bam}
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+rule scSplit_regions:
+    input:
+        fai=FAI,
+        bam=outdir + "/{pool}/scSplit/possort_dedup_filtered.bam"
+    output:
+        regions = temp(outdir + "/{pool}/scSplit/regions_file"),
+        benchmark = outdir + "/benchmarks/{pool}.scSplit_regions_qstat.txt"
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 5,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 5
+    threads: 1
+    benchmark:
+        outdir + "/benchmarks/{pool}.scSplit_regions.txt"
+    params:
+        sif=demuxafy_sif
+    group: "freebayes"
+    shell:
+        """
+        singularity exec {params.sif} fasta_generate_regions.py {input.fai} 100000 > {output.regions}
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+rule scSplit_freebayes:
+    input:
+        fasta=FASTA,
+        bam=outdir + "/{pool}/scSplit/possort_dedup_filtered.bam",
+        regions=outdir + "/{pool}/scSplit/regions_file"
+    output:
+        vcf = outdir + "/{pool}/scSplit/freebayes_var.vcf",
+        benchmark = outdir + "/benchmarks/{pool}.scSplit_freebayes_qstat.txt"
+    group: "freebayes"
+    threads: 40
+    benchmark:
+        outdir + "/benchmarks/{pool}.scSplit_freebayes.txt"
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 2,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 2
+    params:
+        sif=demuxafy_sif
+    shell:
+        """
+        singularity exec {params.sif} freebayes-parallel {input.regions} {threads} -f {input.fasta} -iXu -C 2 -q 1 {input.bam} > {output.vcf}
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+ 
+rule scSplit_vcf_qual_filt:
+    input:
+        vcf= ancient(outdir + "/{pool}/scSplit/freebayes_var.vcf")
+    output:
+        outdir + "/{pool}/scSplit/freebayes_var_qual30.vcf.recode.vcf",
+    group: "freebayes"
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 10,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 10
+    threads: 1
+    benchmark:
+        outdir + "/benchmarks/{pool}.scSplit_vcf_qual_filt.txt"
+    params:
+        out=outdir + "/{pool}/scSplit/freebayes_var_qual30.vcf",
+        sif=demuxafy_sif,
+        benchmark = outdir + "/benchmarks/{pool}.scSplit_vcf_qual_filt_qstat.txt"
+    shell:
+        """
+        singularity exec {params.sif} vcftools --gzvcf {input.vcf} --minQ 30 --recode --recode-INFO-all --out {params.out}
+        qstat -j $JOB_ID >> {params.benchmark}
+        """      
+
+rule scSplit_bgzip:
+    input:
+        outdir + "/{pool}/scSplit/freebayes_var_qual30.vcf.recode.vcf"
+    output:
+        gz=outdir + "/{pool}/scSplit/freebayes_var_qual30.vcf.recode.vcf.gz",
+        index=outdir + "/{pool}/scSplit/freebayes_var_qual30.vcf.recode.vcf.gz.tbi",
+        benchmark = outdir + "/benchmarks/{pool}.scSplit_bgzip_qstat.txt"
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 10,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 10
+    threads: 1
+    benchmark:
+        outdir + "/benchmarks/{pool}.scSplit_bgzip.txt"
+    params:
+        sif=demuxafy_sif
+    shell:
+        """
+        singularity exec {params.sif} bgzip  -c {input} > {output.gz}
+        singularity exec {params.sif} tabix -p vcf {output.gz}
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+##### This is how it should be done but forgot before pileup #####
+rule scSplit_subset_vcf:
+    input:
+        pileup=outdir + "/{pool}/scSplit/freebayes_var_qual30.vcf.recode.vcf.gz",
+        snps=SNP_GENOTYPES + ".gz"
+    output:
+        vcf = outdir + "/{pool}/scSplit/frebayes_var_qual30_subset.vcf",
+        benchmark = outdir + "/benchmarks/{pool}.scSplit_subset_vcf_qstat.txt"
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 10,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 10
+    threads: 1
+    benchmark:
+        outdir + "/benchmarks/{pool}.scSplit_subset_vcf.txt"
+    params:
+        sif=demuxafy_sif,
+    shell:
+        """
+        singularity exec {params.sif} bcftools view {input.pileup} -R {input.snps} -Ov -o {output.vcf}
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+
+##### scSplit Allele Counting #####
+rule scSplit_allele_matrices:
+    input:
+        snvs = SNP_GENOTYPES,
+        vcf=outdir + "/{pool}/scSplit/frebayes_var_qual30_subset.vcf",
+        bam=outdir + "/{pool}/scSplit/possort_dedup_filtered.bam"
+    output:
+        alt=outdir + "/{pool}/scSplit/alt_filtered.csv",
+        ref=outdir + "/{pool}/scSplit/ref_filtered.csv",
+        benchmark = outdir + "/benchmarks/{pool}.scSplit_allele_matrices_qstat.txt"
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 50,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 50
+    threads: 4
+    benchmark:
+        outdir + "/benchmarks/{pool}.scSplit_allele_matrices.txt"
+    params:
+        out=outdir + "/{pool}/scSplit/",
+        sif=demuxafy_sif,
+        barcodes=lambda wildcards: samples.Barcodes[samples.Pool == wildcards.pool].iloc[0]
+    shell:
+        """
+        singularity exec {params.sif} scSplit count -c {input.snvs} -v {input.vcf} -i {input.bam} -b {params.barcodes} -r {output.ref} -a {output.alt} -o {params.out}
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+##### scSplit Demultiplexing #####
+rule scSplit_demultiplex:
+    input:
+        alt=outdir + "/{pool}/scSplit/alt_filtered.csv",
+        ref=outdir + "/{pool}/scSplit/ref_filtered.csv"
+    output:
+        Psc=outdir + "/{pool}/scSplit/scSplit_P_s_c.csv",
+        result=outdir + "/{pool}/scSplit/scSplit_result.csv",
+        benchmark = outdir + "/benchmarks/{pool}.scSplit_demultiplex_qstat.txt"
+    threads: 5
+    benchmark:
+        outdir + "/benchmarks/{pool}.scSplit_demultiplex.txt"
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 30,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 30
+    params:
+        out=outdir + "/{pool}/scSplit/",
+        sif=demuxafy_sif,
+        N=lambda wildcards: samples.N[samples.Pool == wildcards.pool].iloc[0]
+    shell:
+        """  
+        singularity exec {params.sif} scSplit run -r {input.ref} -a {input.alt} -n {params.N} -o {params.out}
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+##### scSplit Get Genotypes #####
+rule scSplit_genotypes:
+    input:
+        alt=outdir + "/{pool}/scSplit/alt_filtered.csv",
+        ref=outdir + "/{pool}/scSplit/ref_filtered.csv",
+        demultiplex=outdir + "/{pool}/scSplit/scSplit_P_s_c.csv"
+    output:
+        outdir + "/{pool}/scSplit/scSplit.vcf",
+        benchmark = outdir + "/benchmarks/{pool}.scSplit_genotypes.txt"
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 10,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 10
+    threads: 1
+    benchmark:
+        outdir + "/benchmarks/{pool}.scSplit_genotypes_qstat.txt"
+    params:
+        out=outdir + "/{pool}/scSplit/",
+        sif=demuxafy_sif
+    shell:
+        """
+        singularity exec {params.sif} scSplit genotype -r {input.ref} -a {input.alt} -p {input.demultiplex} -o {params.out}
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+###################################
+############# POPSCLE #############
+###################################
+##### Popscle Pileup #####
+rule popscle_pileup:
+    input:
+        vcf=SNP_GENOTYPES,
+        barcodes=lambda wildcards: samples.Barcodes[samples.Pool == wildcards.pool].iloc[0],
+        bam=datadir + "/{pool}_V1/outs/possorted_genome_bam.bam"
+    output:
+        outdir = directory(outdir + "/{pool}/popscle/pileup/"),
+        benchmark = outdir + "/benchmarks/{pool}.popscle_pileup_qstat.txt"
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 10,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 10
+    threads: 10
+    benchmark:
+        outdir + "/benchmarks/{pool}.popscle_pileup.txt"
+    params:
+        sif=demuxafy_sif
+    shell:
+        """
+        singularity exec {params.sif} popscle dsc-pileup --sam {input.bam} --vcf {input.vcf} --group-list {input.barcodes} --out {output.outdir}pileup
+        qstat -j $JOB_ID >> {output.benchmark}
+        [[ -s {output.outdir}pileup.var.gz ]]
+        echo $?
+        """
+
+##### Popscle Freemuxlet Demultiplexing #####
+rule popscle_freemuxlet:
+    input:
+        pileup=outdir + "/{pool}/popscle/pileup/",
+        barcodes=lambda wildcards: samples.Barcodes[samples.Pool == wildcards.pool].iloc[0]
+    output:
+        table=outdir + "/{pool}/popscle/freemuxlet/freemuxletOUT.clust1.samples.gz",
+        genotypes=outdir + "/{pool}/popscle/freemuxlet/freemuxletOUT.clust1.vcf.gz",
+        benchmark = outdir + "/benchmarks/{pool}.popscle_freemuxlet_qstat.txt"
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 30,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 30
+    threads: 1
+    benchmark:
+        outdir + "/benchmarks/{pool}.popscle_freemuxlet.txt"
+    params:
+        out=outdir + "/{pool}/popscle/freemuxlet/freemuxletOUT",
+        sif=demuxafy_sif,
+        N=lambda wildcards: samples.N[samples.Pool == wildcards.pool].iloc[0]
+    shell:
+        """
+        singularity exec {params.sif} popscle freemuxlet --plp {input.pileup}pileup --out {params.out} --group-list {input.barcodes} --nsample {params.N}
+        qstat -j $JOB_ID >> {output.benchmark}
+        [[ -s {output.genotypes} ]]
+        echo $?
+        """
+
+##### Popscle Demuxlet Individual File Generation #####
+rule popscle_demuxlet_ind_files:
+    input:
+        outdir + "/{pool}/popscle/pileup/"
+    output:
+        ind_file = outdir + "/{pool}/popscle/Individuals.txt",
+        benchmark = outdir + "/benchmarks/{pool}.popscle_demuxlet_ind_files_qstat.txt"
+    resources:
+        mem_per_thread_gb=5,
+        disk_per_thread_gb=5
+    threads: 1
+    benchmark:
+        outdir + "/benchmarks/{pool}.popscle_demuxlet_ind_files.txt"
+    params:
+        sif=demuxafy_sif,
+        individuals=lambda wildcards: samples.Individuals[samples.Pool == wildcards.pool].iloc[0]
+    shell:
+        """
+        singularity exec {params.sif} echo {params.individuals} | tr "," "\n" > {output.ind_file}
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+##### Popscle Demuxlet Demultiplexing #####
+rule popscle_demuxlet:
+    input:
+        pileup=outdir + "/{pool}/popscle/pileup/",
+        snps=SNP_GENOTYPES,
+        barcodes=lambda wildcards: samples.Barcodes[samples.Pool == wildcards.pool].iloc[0],
+        individuals=outdir + "/{pool}/popscle/Individuals.txt"
+    output:
+        results = outdir + "/{pool}/popscle/demuxlet/demuxletOUT_impute_vars.best",
+        benchmark = outdir + "/benchmarks/{pool}.popscle_demuxlet_qstat.txt"
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 10,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 10
+    threads: 5
+    benchmark:
+        outdir + "/benchmarks/{pool}.popscle_demuxlet.txt"
+    params:
+        out=outdir + "/{pool}/popscle/demuxlet/",
+        sif=demuxafy_sif,
+        field="GP"
+    shell:
+        """
+        singularity exec {params.sif} popscle demuxlet --plp {input.pileup}pileup --vcf {input.snps} --field {params.field} --group-list {input.barcodes} --geno-error-coeff 1.0 --geno-error-offset 0.05 --out {params.out}demuxletOUT_impute_vars --sm-list {input.individuals}
+        qstat -j $JOB_ID >> {output.benchmark}
+        [[ -s {output.results} ]]
+        echo $?
+        """
+
+###################################
+############## VIREO ##############
+###################################
+##### cellSNP Pileup #####
+rule cellSNP:
+    input:
+        vcf=SNP_GENOTYPES,
+        barcodes=lambda wildcards: samples.Barcodes[samples.Pool == wildcards.pool].iloc[0],
+        bam=datadir + "/{pool}_V1/outs/possorted_genome_bam.bam"
+    output:
+        outdir + "/{pool}/vireo/cellSNPpileup.vcf.gz",
+        benchmark = outdir + "/benchmarks/{pool}.cellSNP_qstat.txt"
+    resources:
+        mem_per_thread_gb=40,
+        disk_per_thread_gb=40
+    threads: 1
+    benchmark:
+        outdir + "/benchmarks/{pool}.cellSNP.txt"
+    params:
+        sif=demuxafy_sif,
+        p=20,
+        maf=0.1,
+        count=20,
+        out = outdir + "/{pool}/vireo/"
+    shell:
+        """
+        singularity exec {params.sif} cellsnp-lite -s {input.bam} -b {input.barcodes} -O {params.out} -R {input.vcf} -p {params.p} --minMAF {params.maf} --minCOUNT {params.count} --gzip
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+
+##### Subset the imputed genotype files by the individuals in the pools #####
+rule subset_vcf:
+    input:
+        pileup = outdir + "/{pool}/vireo/cellSNPpileup.vcf.gz",
+        snps = SNP_GENOTYPES + ".gz"
+    output:
+        vcf = outdir + "/{pool}/vireo/Merged_MAF0.01.dose_GeneFiltered_hg38_individualSubset.vcf.gz",
+        qstat = outdir + "/benchmarks/{pool}_subset_vcf_qstat.txt"
+    resources:
+        mem_per_thread_gb=10,
+        disk_per_thread_gb=10
+    threads: 1
+    benchmark:
+        outdir + "/benchmarks/{pool}.subset_vcf.txt"
+    params:
+        sif=demuxafy_sif,
+        individuals=lambda wildcards: samples.Individuals[samples.Pool == wildcards.pool].iloc[0],
+        pileup_unzipped = outdir + "/{pool}/vireo/cellSNPpileup_updated.vcf"
+    shell:
+        """
+        singularity exec {params.sif} bcftools view -R {input.pileup} -s {params.individuals} -Oz -o {output.vcf} {input.snps}
+        qstat -j $JOB_ID > {output.qstat}
+        """
+
+##### Vireo demultiplexing #####
+rule vireo:
+    input:
+        pileup = outdir + "/{pool}/vireo/cellSNPpileup.vcf.gz",
+        snps = outdir + "/{pool}/vireo/Merged_MAF0.01.dose_GeneFiltered_hg38_individualSubset.vcf.gz"
+    output:
+        tsv = outdir + "/{pool}/vireo/results/donor_ids.tsv",
+        benchmark = outdir + "/benchmarks/{pool}.vireo_qstat.txt"
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 40,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 40
+    threads: 2
+    benchmark:
+        outdir + "/benchmarks/{pool}.vireo.txt"
+    params:
+        out=outdir + "/{pool}/vireo/results/",
+        sif=demuxafy_sif,
+        field="GP",
+        N=lambda wildcards: samples.N[samples.Pool == wildcards.pool].iloc[0]
+    shell:
+        """
+        singularity exec {params.sif} vireo -c {input.pileup} -d {input.snps} -o {params.out} -t {params.field} -N {params.N} --noPlot
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+####################################
+############ SOUPORCELL ############
+####################################
+##### Run the souporcell pipeline #####
+rule souporcell:
+    input:
+        bam=datadir + "/{pool}_V1/outs/possorted_genome_bam.bam",
+        barcodes=lambda wildcards: samples.Barcodes[samples.Pool == wildcards.pool].iloc[0],
+        fasta=FASTA,
+        snps=SNP_GENOTYPES
+    threads: 10
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 10,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 10
+    benchmark:
+        outdir + "/benchmarks/{pool}.souporcell.txt"
+    output:
+        genotypes=outdir + "/{pool}/souporcell/cluster_genotypes.vcf",
+        clusters=outdir + "/{pool}/souporcell/clusters.tsv",
+        benchmark = outdir + "/benchmarks/{pool}.souporcell_qstat.txt"
+    params:
+        out=outdir + "/{pool}/souporcell/",
+        sif=demuxafy_sif,
+        N=lambda wildcards: samples.N[samples.Pool == wildcards.pool].iloc[0],
+    shell:
+        """
+        singularity exec {params.sif} souporcell_pipeline.py -i {input.bam} -b {input.barcodes} -f {input.fasta} -t {threads} -o {params.out} -k {params.N} --common_variants {input.snps}
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+
+#####################################
+############ DROPULATION ############
+#####################################
+rule dropulation_tag:
+    input:
+        gtf = gtf,
+        bam = datadir + "/{pool}_V1/outs/possorted_genome_bam.bam"
+    threads: 16
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 4,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 4
+    benchmark:
+        outdir + "/benchmarks/{pool}.dropulation_tag.txt"
+    output:
+        benchmark = outdir + "/benchmarks/{pool}.dropulation_tag_qstat.txt",
+        bam = temp(outdir + "/{pool}/dropulation/tagged_bam.bam")
+    params:
+        sif = demuxafy_sif
+    shell:
+        """
+        singularity exec {params.sif} /opt/Drop-seq_tools-2.5.4/TagReadWithGeneFunction \
+            --ANNOTATIONS_FILE {input.gtf} \
+            --INPUT {input.bam} \
+            --OUTPUT {output.bam} 
+
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+
+rule dropulation_assign:
+    input:
+        bam = outdir + "/{pool}/dropulation/tagged_bam.bam",
+        barcodes = lambda wildcards: samples.Barcodes[samples.Pool == wildcards.pool].iloc[0],
+        snps = SNP_GENOTYPES,
+        individuals = outdir + "/{pool}/popscle/Individuals.txt"
+    threads: 16
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 4,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 4
+    benchmark:
+        outdir + "/benchmarks/{pool}.dropulation_assign.txt"
+    output:
+        benchmark = outdir + "/benchmarks/{pool}.dropulation_assign_qstat.txt",
+        vcf = outdir + "/{pool}/dropulation/out_vcf.vcf",
+        assignments = outdir + "/{pool}/dropulation/assignments.tsv.gz"
+    params:
+        sif = demuxafy_sif
+    shell:
+        """
+        singularity exec {params.sif} /opt/Drop-seq_tools-2.5.4/AssignCellsToSamples --CELL_BC_FILE {input.barcodes} \
+            --INPUT_BAM {input.bam} \
+            --OUTPUT {output.assignments} \
+            --VCF {input.snps} \
+            --SAMPLE_FILE {input.individuals} \
+            --CELL_BARCODE_TAG 'CB' \
+            --MOLECULAR_BARCODE_TAG 'UB' \
+            --VCF_OUTPUT {output.vcf} \
+            --MAX_ERROR_RATE 0.05
+
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+rule dropulation_doublet:
+    input:
+        assignments = outdir + "/{pool}/dropulation/assignments.tsv.gz",
+        bam = outdir + "/{pool}/dropulation/tagged_bam.bam",
+        barcodes=lambda wildcards: samples.Barcodes[samples.Pool == wildcards.pool].iloc[0],
+        vcf = outdir + "/{pool}/dropulation/out_vcf.vcf",
+        individuals = outdir + "/{pool}/popscle/Individuals.txt"
+    threads: 16
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 4,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 4
+    benchmark:
+        outdir + "/benchmarks/{pool}.dropulation_doublet.txt"
+    output:
+        benchmark = outdir + "/benchmarks/{pool}.dropulation_doublet_qstat.txt",
+        likelihoods = outdir + "/{pool}/dropulation/likelihoods.tsv.gz"
+    params:
+        sif = demuxafy_sif
+    shell:
+        """
+        singularity exec {params.sif} /opt/Drop-seq_tools-2.5.4/DetectDoublets --CELL_BC_FILE {input.barcodes} \
+            --INPUT_BAM {input.bam} \
+            --OUTPUT {output.likelihoods} \
+            --VCF {input.vcf} \
+            --CELL_BARCODE_TAG 'CB' \
+            --MOLECULAR_BARCODE_TAG 'UB' \
+            --SINGLE_DONOR_LIKELIHOOD_FILE {input.assignments} \
+            --SAMPLE_FILE {input.individuals} \
+            --MAX_ERROR_RATE 0.05
+
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+
+rule dropulation_call:
+    input:
+        assignments = outdir + "/{pool}/dropulation/assignments.tsv.gz",
+        likelihoods = outdir + "/{pool}/dropulation/likelihoods.tsv.gz"
+    threads: 16
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 4,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 4
+    benchmark:
+        outdir + "/benchmarks/{pool}.dropulation_doublet.txt"
+    output:
+        results = outdir + "/{pool}/dropulation/updated_assignments.tsv.gz",
+        benchmark = outdir + "/benchmarks/{pool}.dropulation_call.txt"
+    params:
+        script = tool_scripts + "dropulation_call.R"
+    conda:
+        simulation_scripts_dir + "/../../../conda_environments/generalR.yaml"
+    shell:
+        """
+        Rscript {params.script} {input.assignments} {input.likelihoods} {output}
+
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+
+###################################
+############ DEMUXALOT ############
+###################################
+rule demuxalot:
+    input:
+        bam=datadir + "/{pool}_V1/outs/possorted_genome_bam.bam",
+        barcodes=lambda wildcards: samples.Barcodes[samples.Pool == wildcards.pool].iloc[0],
+        fasta=FASTA,
+        snps=SNP_GENOTYPES,
+        individuals=outdir + "/{pool}/popscle/Individuals.txt"
+    threads: 16
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 4,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 4
+    benchmark:
+        outdir + "/benchmarks/{pool}.demuxalot.txt"
+    output:
+        benchmark = outdir + "/benchmarks/{pool}.demuxalot_script.txt",
+        assign = outdir + "/{pool}/demuxalot/assignments.tsv.gz",
+        assign_refined = outdir + "/{pool}/demuxalot/assignments_refined.tsv.gz"
+    params:
+        out = outdir + "/{pool}/demuxalot/",
+        script = tool_scripts + "/demuxalot_script.py"
+        sif = demuxafy_sif
+    shell:
+        """
+        singularity exec {params.sif} python {params.script} \
+            -b {input.barcodes} \
+            -a {input.bam} \
+            -n {input.individuals} \
+            -v {input.snps} \
+            -o {params.out}
+
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+
+
+
+###############################################
+############ TXN-based PRE-process ############
+###############################################
+
+##### gzip files for scrublet #####
+rule copy_matrix_files:
+    input:
+        matrix=datadir + "/{pool}_V1/outs/filtered_gene_bc_matrices/Homo_sapiens_GRCh38p10/matrix.mtx",
+        genes=datadir + "/{pool}_V1/outs/filtered_gene_bc_matrices/Homo_sapiens_GRCh38p10/genes.tsv",
+        barcodes=datadir + "/{pool}_V1/outs/filtered_gene_bc_matrices/Homo_sapiens_GRCh38p10/barcodes.tsv"
+    output:
+        matrix=outdir + "/{pool}/matrix_out/matrix.mtx",
+        genes=outdir + "/{pool}/matrix_out/features.tsv",
+        barcodes=outdir + "/{pool}/matrix_out/barcodes.tsv",
+        genes2=outdir + "/{pool}/matrix_out/genes.tsv"
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 1,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 1
+    threads: 1
+    benchmark:
+        outdir + "/benchmarks/{pool}.copy_matrix_files.txt"
+    params:
+        sif=demuxafy_sif
+    shell:
+        """
+        singularity exec {params.sif} cp {input.matrix} {output.matrix} 
+        singularity exec {params.sif} cp {input.genes} {output.genes}
+        singularity exec {params.sif} cp {input.genes} {output.genes2}
+        singularity exec {params.sif} cp {input.barcodes} {output.barcodes}
+        """
+    
+rule gzip:
+    input:
+        matrix=outdir + "/{pool}/matrix_out/matrix.mtx",
+        genes=outdir + "/{pool}/matrix_out/features.tsv",
+        barcodes=outdir + "/{pool}/matrix_out/barcodes.tsv"
+    output:
+        matrix=outdir + "/{pool}/matrix_out/matrix.mtx.gz",
+        genes=outdir + "/{pool}/matrix_out/features.tsv.gz",
+        barcodes=outdir + "/{pool}/matrix_out/barcodes.tsv.gz"
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 1,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 1
+    threads: 1
+    benchmark:
+        outdir + "/benchmarks/{pool}.unzip.txt"
+    params:
+        sif=demuxafy_sif
+    shell:
+        """
+        singularity exec {params.sif} gzip < {input.matrix} > {output.matrix}
+        singularity exec {params.sif} gzip < {input.genes} > {output.genes}
+        singularity exec {params.sif} gzip < {input.barcodes} > {output.barcodes}
+        """
+
+
+###### scrublet pipeline ########
+if os.path.exists(outdir + "/scrublet_fix.tsv"):
+    rule scrublet_fix:
+        input:
+            fix = outdir + "/scrublet_fix.tsv",
+            matrix=outdir + "/{scrub_fix_pool}/matrix_out/matrix.mtx",
+            barcodes=outdir + "/{scrub_fix_pool}/matrix_out/barcodes.tsv"
+        output:
+            scrub = outdir + "/{scrub_fix_pool}/scrublet_{fix_pctl}/scrublet_results.txt",
+            qstat = outdir + "/benchmarks/{scrub_fix_pool}_scrublet_{fix_pctl}_qstat.txt"
+        resources:
+            mem_per_thread_gb=16,
+            disk_per_thread_gb=16
+        threads: 1
+        params:
+            thresh=lambda wildcards: scrublet_fix_df.Threshold[scrublet_fix_df.Pool == wildcards.scrub_fix_pool].iloc[0],
+            sif = demuxafy_sif,
+            out=outdir + "/{scrub_fix_pool}/scrublet_{fix_pctl}/",
+            pipeline_dir = tool_scripts,
+            script = tool_scripts + "/scrublet_pipeline.py"
+        shell:
+            """
+            singularity exec {params.sif} python {script} --counts_matrix {input.matrix} --barcodes {input.barcodes} --min_gene_variability_pctl {wildcards.fix_pctl} -o {params.out} -d {params.pipeline_dir} -t {params.thresh}
+            [[ -s {output.scrub} ]]
+            qstat -j $JOB_ID >> {output.qstat}
+            echo $?
+            """
+
+else:
+    ###### scrublet pipeline ########
+    rule scrublet:
+        input:
+            matrix=outdir + "/{pool}/matrix_out/matrix.mtx",
+            barcodes=outdir + "/{pool}/matrix_out/barcodes.tsv"
+        output:
+            scrub = outdir + "/{pool}/scrublet_{pctl}/scrublet_results.txt",
+            qstat = outdir + "/benchmarks/{pool}_scrublet_{pctl}_qstat.txt"
+        resources:
+            mem_per_thread_gb=lambda wildcards, attempt: attempt * 16,
+            disk_per_thread_gb=lambda wildcards, attempt: attempt * 16
+        threads: 2
+        params:
+            pctl="{pctl}",
+            sif=demuxafy_sif,
+            out=outdir + "/{pool}/scrublet_{pctl}/",
+            script = tool_scripts + "/scrublet_pipeline.py",
+            pipeline_dir =  tool_scripts
+        shell:
+            """
+            singularity exec {params.sif} python {script} --counts_matrix {input.matrix} --barcodes {input.barcodes} --min_gene_variability_pctl {params.pctl} -o {params.out} -d {params.pipeline_dir}
+            qstat -j $JOB_ID >> {output.qstat}
+            [[ -s {output.scrub} ]]
+            echo $?
+            """
+
+
+
+##############################
+############ SCDS ############
+##############################
+rule scds:
+    input:
+        genes=outdir + "/{pool}/matrix_out/genes.tsv"
+    output: 
+        doublets=outdir + "/{pool}/scds/scds_doublets.txt",
+        variables=outdir + "/{pool}/scds/scds_variables.txt",
+        benchmark = outdir + "/benchmarks/{pool}.scds_qstat.txt"
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 10,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 10
+    threads: 1
+    params:
+        script= tool_scripts = "/scds.R",
+        matrix_dir=outdir + "/{pool}/matrix_out/",
+        out=outdir + "/{pool}/scds/",
+        sif=demuxafy_sif
+    benchmark:
+        outdir + "/benchmarks/{pool}.scds.txt"
+    shell:
+        """
+        singularity exec {params.sif} echo {wildcards.pool} > {output.variables}
+        singularity exec {params.sif} echo {params.out} >> {output.variables}
+        singularity exec {params.sif} echo {params.matrix_dir} >> {output.variables}
+        singularity exec {params.sif} Rscript {params.script} {output.variables}
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+#######################################
+############ DOUBLET DECON ############
+#######################################
+rule DoubletDecon:
+    input:
+        barcodes=outdir + "/{pool}/matrix_out/barcodes.tsv.gz"
+    output:
+        doublets = outdir + "/{pool}/DoubletDecon_rhop{rhop}/Final_doublets_groups_DoubletDecon_results.txt",
+        singlets = outdir + "/{pool}/DoubletDecon_rhop{rhop}/Final_nondoublets_groups_DoubletDecon_results.txt",
+        variables=outdir + "/{pool}/DoubletDecon_rhop{rhop}/DoubletDecon_variables.txt",
+        benchmark = outdir + "/benchmarks/{pool}.DoubletDecon_rhop{rhop}_qstat.txt"
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 24,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 24
+    threads: 2
+    params:
+        script= tool_scripts + "/DoubletDecon.R",
+        matrix_dir=outdir + "/{pool}/matrix_out/",
+        out=outdir + "/{pool}/DoubletDecon_rhop{rhop}/",
+        sif=demuxafy_sif,
+        res = "0.2",
+        logs = outdir + "/logs/"
+    benchmark:
+        outdir + "/benchmarks/{pool}.DoubletDecon_rhop{rhop}.txt"
+    shell:
+        """
+        singularity exec {params.sif} echo {wildcards.pool} > {output.variables}
+        singularity exec {params.sif} echo {params.out} >> {output.variables}
+        singularity exec {params.sif} echo {params.matrix_dir} >> {output.variables}
+        singularity exec {params.sif} echo {wildcards.rhop} >> {output.variables}
+        singularity exec {params.sif} echo {params.res} >> {output.variables}
+        singularity exec {params.sif} Rscript {params.script} {output.variables}
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+
+########################################
+############ DOUBLET FINDER ############
+########################################
+rule DoubletFinder:
+    input:
+        barcodes=outdir + "/{pool}/matrix_out/barcodes.tsv.gz"
+    output:
+        doublets = outdir + "/{pool}/DoubletFinder/DoubletFinder_doublets.txt",
+        variables=outdir + "/{pool}/DoubletFinder/DoubletFinder_variables.txt",
+        tenX=outdir + "/{pool}/QCfiltered_gene_bc_matrices/matrix.mtx",
+        benchmark = outdir + "/benchmarks/{pool}.DoubletFinder_qstat.txt"
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 10,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 10
+    threads: 2
+    params:
+        script = tool_scripts + "/DoubletFinder.R",
+        matrix_dir=outdir + "/{pool}/matrix_out/",
+        out=outdir + "/{pool}/DoubletFinder/",
+        sif=demuxafy_sif,
+        QCdir = outdir + "/{pool}/QCfiltered_gene_bc_matrices/",
+        filedir = tool_scripts + "../files/"
+    benchmark:
+        outdir + "/benchmarks/{pool}.DoubletFinder.txt",
+    shell:
+        """
+        singularity exec {params.sif} echo {wildcards.pool} > {output.variables}
+        singularity exec {params.sif} echo {params.out} >> {output.variables}
+        singularity exec {params.sif} echo {params.QCdir} >> {output.variables}
+        singularity exec {params.sif} echo {params.matrix_dir} >> {output.variables}
+        singularity exec {params.sif} echo {params.filedir} >> {output.variables}
+        singularity exec {params.sif} Rscript {params.script} {output.variables}
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+###########################################
+############ DOUBLET DETECTION ############
+###########################################
+rule DoubletDetection:
+    input:
+        matrix=outdir + "/{pool}/matrix_out/matrix.mtx.gz"
+    output:
+        doublets = outdir + "/{pool}/DoubletDetection/DoubletDetection_predicted_doublet.txt",
+        variables=outdir + "/{pool}/DoubletDetection/DoubletDetection_variables.txt",
+        benchmark = outdir + "benchmarks/{pool}.DoubletDetection_qstat.txt"
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 10,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 10
+    threads: 2
+    params:
+        matrix_dir=outdir + "/{pool}/matrix_out/",
+        out=outdir + "/{pool}/DoubletDetection/",
+        script= tool_scripts + "/DoubletDetection.py",
+        sif=demuxafy_sif
+    benchmark:
+        outdir + "benchmarks/{pool}.DoubletDetection.txt"
+    shell:
+        """
+        singularity exec {params.sif} echo {wildcards.pool} > {output.variables}
+        singularity exec {params.sif} echo {params.out} >> {output.variables}
+        singularity exec {params.sif} echo {params.matrix_dir} >> {output.variables}
+        singularity exec {params.sif} python {params.script} --counts_matrix {input.matrix} -o {params.out}
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+############################################
+################### SOLO ###################
+############################################
+rule solo:
+    input:
+        datadir + "/{pool}_V1/outs/filtered_gene_bc_matrices/Homo_sapiens_GRCh38p10"
+    output:
+        results = outdir + "/{pool}/solo/is_doublet.npy",
+        score = outdir + "/{pool}/solo/logit_scores.npy",
+        benchmark = outdir + "benchmarks/{pool}.solo_qstat.txt"
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 40,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 40
+    threads: 1
+    params:
+        out=outdir + "/{pool}/solo/",
+        doublets=lambda wildcards: samples.Doublets[samples.Pool == wildcards.pool].iloc[0],
+        sif=demuxafy_sif,
+        json = tool_scripts + "/solo_model.json" ### Used this json for almost all except ONEK1K Sample61 which continually failed. Suggested to use different latent variable number for that pool to see if it would work better
+    benchmark:
+        outdir + "benchmarks/{pool}.solo.txt"
+    shell:
+        """
+        singularity exec {params.sif} solo -o {params.out} -e {params.doublets} {params.json} {input}
+        qstat -j $JOB_ID >> {output.benchmark}
+        """
+
+rule solo_convert_results:
+    input:
+        doublets = outdir + "/{pool}/solo/is_doublet.npy",
+        score = outdir + "/{pool}/solo/logit_scores.npy",
+        barcodes = lambda wildcards: samples.Barcodes[samples.Pool == wildcards.pool].iloc[0]
+    output:
+        outdir + "/{pool}/solo/solo_results.txt"
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 40,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 40
+    threads: 1
+    params:
+        out = outdir + "/{pool}/solo",
+        solo = outdir + "/{pool}/solo",
+        sif=demuxafy_sif,
+        script = tool_scripts + "/Convert_solo_output.py"
+    shell:
+        """
+        singularity exec {params.sif} python {params.script} -b {input.barcodes} -s {params.solo} -o {params.out}
+        """
+
+
+
+###################################################
+################### SCDBLFINDER ###################
+###################################################
+rule scdblfinder:
+    input:
+        matrix = outdir + "/{pool}/matrix_out/matrix.mtx"
+    output:
+        results = outdir + "/{pool}/scDblFinder/scDblFinder_results.txt",
+        variables = outdir + "/{pool}/scDblFinder/scDblFinder_variables.txt",
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 12,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 12
+    threads: 2
+    params:
+        out=outdir + "/{pool}/scDblFinder/",
+        matrix_dir= outdir + "/{pool}/matrix_out/",
+        script = tool_scripts + "/scDblFinder.R",
+        sif= demuxafy_sif
+    benchmark:
+        outdir + "benchmarks/{pool}.scDblFinder.txt"
+    shell:
+        """
+        singularity exec {params.sif} echo {params.out} >> {output.variables}
+        singularity exec {params.sif} echo {params.matrix_dir} >> {output.variables}
+        singularity exec {params.sif} Rscript {params.script} {output.variables}
+        """
+
+
+#################################
+############ COMBINE ############
+#################################
+rule demuxlet_results_temp:
+    input:
+        demuxlet=outdir + "/{pool}/popscle/demuxlet/demuxletOUT_impute_vars.best"
+    output:
+        demuxlet_temp=outdir + "/{pool}/CombinedResults/demuxlet_temp.txt"
+    resources:
+        mem_per_thread_gb=1,
+        disk_per_thread_gb=1
+    threads: 1
+    benchmark:
+        outdir + "benchmarks/{pool}.demuxlet_results_temp.txt"
+    shell:
+        """
+        awk 'BEGIN{{OFS=FS="\\t"}}{{print $2,$3,$5,$6,$14,$19,$20}}' {input.demuxlet} | sed "s/SNG/singlet/g" | sed "s/DBL/doublet/g" | sed "s/AMB/unassigned/g" | awk 'BEGIN{{FS=OFS="\t"}} $3=="doublet" {{$4="doublet"}}1' | sed -E "s/,[0-9]+_[0-9]+,[0-9].[0-9]+\t/\t/g" | sed "s/NUM.SNPS/nSNP/g" | sed "s/DROPLET.TYPE/DropletType/g" | sed "s/BEST.GUESS/Assignment/g" | sed "s/singlet.BEST.LLK/SingletLLK/g" | sed "s/doublet.BEST.LLK/DoulbetLLK/g" | sed "s/DIFF.LLK.singlet.doublet/DiffLLK/g" | sed "1s/\t/\tdemuxlet_/g" | sed "s/BARCODE/Barcode/g" | awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}'  > {output.demuxlet_temp}
+        """
+
+rule freemuxlet_results_temp:
+    input:
+        freemuxlet=outdir + "/{pool}/popscle/freemuxlet/freemuxletOUT.clust1.samples.gz"
+    output:
+        freemuxlet_temp=outdir + "/{pool}/CombinedResults/freemuxlet_temp.txt"
+    resources:
+        mem_per_thread_gb=1,
+        disk_per_thread_gb=1
+    threads: 1
+    benchmark:
+        outdir + "benchmarks/{pool}.freemuxlet_results_temp.txt"
+    shell:
+        """
+        gunzip -c {input.freemuxlet} | awk 'BEGIN{{OFS=FS="\\t"}}{{print $2,$3,$5,$6,$14,$19,$20 }}' | sed "s/SNG/singlet/g" | sed "s/DBL/doublet/g" | sed "s/AMB/unassigned/g" | awk 'BEGIN{{FS=OFS="\\t"}} $3=="doublet" {{$4="doublet"}}1' | sed -E "s/,[0-9]+\t/\t/g" | sed "s/NUM.SNPS/nSNP/g" | sed "s/DROPLET.TYPE/DropletType/g" | sed "s/BEST.GUESS/Assignment/g" | sed "s/singlet.BEST.LLK/SingletLLK/g" | sed "s/doublet.BEST.LLK/DoulbetLLK/g" | sed "s/DIFF.LLK.singlet.doublet/DiffLLK/g" | sed "s/BARCODE/Barcode/g" | sed "1s/\t/\tfreemuxlet_/g" | awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}' > {output.freemuxlet_temp}
+        """
+
+rule scSplit_results_temp:
+    input:
+        scSplit=outdir + "/{pool}/scSplit/scSplit_result.csv"
+    output:
+        scSplit_temp=outdir + "/{pool}/CombinedResults/scSplit_temp.txt"
+    resources:
+        mem_per_thread_gb=1,
+        disk_per_thread_gb=1
+    threads: 1
+    benchmark:
+        outdir + "benchmarks/{pool}.scSplit_results_temp.txt"
+    shell:
+        """
+        sed -E 's/\tDBL-[0-9]+/\tdoublet\tdoublet/g' {input.scSplit} | sed 's/SNG-/singlet\t/g' | sed 's/Cluster/DropletType\tAssignment/g' | sed "1s/\t/\tscSplit_/g" | awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}' > {output.scSplit_temp}
+        """
+
+rule souporcell_results_temp:
+    input:
+        souporcell=outdir + "/{pool}/souporcell/clusters.tsv"
+    output:
+        souporcell_temp=outdir + "/{pool}/CombinedResults/souporcell_temp.txt"
+    resources:
+        mem_per_thread_gb=1,
+        disk_per_thread_gb=1
+    threads: 1
+    benchmark:
+        outdir + "benchmarks/{pool}.souporcell_results_temp.txt"
+    shell:
+        """
+        awk 'BEGIN{{OFS=FS="\\t"}}{{print $1,$2,$3,$4,$5}}' {input.souporcell} | awk 'BEGIN{{FS=OFS="\t"}} $2=="doublet" {{$3="doublet"}}1' | awk 'BEGIN{{FS=OFS="\t"}} $2=="unassigned" {{$4="unassigned"}}1' | sed "s/status/DropletType/g" | sed "s/assignment/Assignment/g" | sed "s/log_prob_singleton/LogProbSinglet/g" | sed "s/log_prob_doublet/LogProbDoublet/g" | sed "s/barcode/Barcode/g" | sed "1s/\t/\tsouporcell_/g" | awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}' > {output.souporcell_temp}
+        """
+
+rule vireo_results_temp:
+    input:
+        vireo=outdir + "/{pool}/vireo/results/donor_ids.tsv"
+    output:
+        vireo_temp=outdir + "/{pool}/CombinedResults/vireo_temp.txt"
+    resources:
+        mem_per_thread_gb=1,
+        disk_per_thread_gb=1
+    threads: 1
+    benchmark:
+        outdir + "benchmarks/{pool}.vireo_results_temp.txt"
+    shell:
+        """
+        awk 'BEGIN{{OFS=FS="\\t"}}{{print $1,$2,$2,$3,$4,$5}}' {input.vireo} | awk 'BEGIN{{FS=OFS="\\t"}}{{gsub("[0-9]+_THBP-[0-9]+","singlet",$3)}}1' | sed "s/donor_id\tdonor_id/Assignment\tDropletType/g" | sed "s/prob_max/ProbSinglet/g" | sed "s/prob_doublet/ProbDoublet/g" | sed "s/n_vars/nSNP/g" | sed "s/cell/Barcode/g" | sed "1s/\t/\tvireo_/g" | awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}' > {output.vireo_temp}
+        """
+
+
+rule dropulation_results_temp:
+    input:
+        dropulation = outdir + "/{pool}/dropulation/updated_assignments.tsv.gz",
+    output:
+        dropulation_temp=outdir + "/{pool}/CombinedResults/dropulation_temp.txt"
+    resources:
+        mem_per_thread_gb=1,
+        disk_per_thread_gb=1
+    threads: 1
+    benchmark:
+        outdir + "benchmarks/{pool}.dropulation_results_temp.txt"
+    shell:
+        """
+        gunzip -c {input.dropulation} | awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}'  > {output.dropulation_temp}
+        """
+
+
+rule demuxalot_results_temp:
+    input:
+        demuxalot=outdir + "/{pool}/demuxalot/assignments.tsv.gz"
+    output:
+        demuxalot_temp=outdir + "/{pool}/CombinedResults/demuxalot_temp.txt"
+    resources:
+        mem_per_thread_gb=1,
+        disk_per_thread_gb=1
+    threads: 1
+    benchmark:
+        outdir + "benchmarks/{pool}.demuxalot_results_temp.txt"
+    shell:
+        """
+        gunzip -c {input.demuxalot} | awk 'BEGIN{{OFS=FS="\\t"}}{{print $1, $2, $2}}' |  awk 'BEGIN{{FS=OFS="\\t"}}{{gsub("[0-9]+_THBP-[0-9]+\\\\+[0-9]+_THBP-[0-9]+","doublet",$3)}}1' | awk 'BEGIN{{FS=OFS="\\t"}}{{gsub("[0-9]+_THBP-[0-9]+","singlet",$3)}}1' | sed "s/BARCODE/Barcode/g" | awk 'BEGIN{{FS=OFS="\\t"}} $3=="doublet" {{$2="doublet"}}1' | sed "s/0\t0/Assignment\tDropletType/g" | sed "1s/\t/\tdemuxalot_/g" | awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}' > {output.demuxalot_temp}
+        """
+
+
+rule demuxalot_refined_results_temp:
+    input:
+        demuxalot=outdir + "/{pool}/demuxalot/assignments_refined.tsv.gz"
+    output:
+        demuxalot_temp=outdir + "/{pool}/CombinedResults/demuxalot_refined_temp.txt"
+    resources:
+        mem_per_thread_gb=1,
+        disk_per_thread_gb=1
+    threads: 1
+    benchmark:
+        outdir + "benchmarks/{pool}.dropulation_results_temp.txt"
+    shell:
+        """
+        gunzip -c {input.demuxalot} | awk 'BEGIN{{OFS=FS="\\t"}}{{print $1, $2, $2}}' |  awk 'BEGIN{{FS=OFS="\\t"}}{{gsub("[0-9]+_THBP-[0-9]+\\\\+[0-9]+_THBP-[0-9]+","doublet",$3)}}1' | awk 'BEGIN{{FS=OFS="\\t"}}{{gsub("[0-9]+_THBP-[0-9]+","singlet",$3)}}1' | sed "s/BARCODE/Barcode/g" | awk 'BEGIN{{FS=OFS="\\t"}} $3=="doublet" {{$2="doublet"}}1' | sed "s/0\t0/Assignment\tDropletType/g" | sed "1s/\t/\tdemuxalot_refined_/g" | awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}' > {output.demuxalot_temp}
+        """
+
+
+if os.path.exists(outdir + "/scrublet_pctl.tsv"):
+    rule scrublet_results_temp:
+        input:
+            results = lambda wildcards: expand(outdir + "/{pool}/scrublet_{pctl}/scrublet_results.txt", zip, pool = wildcards.pool, pctl = scrublet_decisions.Percentile[scrublet_decisions.Pool == wildcards.pool])
+        output:
+            scrublet_temp=outdir + "/{pool}/CombinedResults/scrublet_temp.txt"
+        resources:
+            mem_per_thread_gb=1,
+            disk_per_thread_gb=1
+        params:
+            path=outdir + "/{pool}/scrublet_",
+            pctl=85
+        threads: 1
+        shell:
+            """
+            awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}' {input.results} > {output.scrublet_temp}
+            """
+
+rule scds_results_temp:
+    input:
+        outdir + "/{pool}/scds/scds_doublets.txt"
+    output:
+        outdir + "/{pool}/CombinedResults/scds_temp.txt"
+    resources:
+        mem_per_thread_gb=1,
+        disk_per_thread_gb=1
+    threads: 1
+    shell:
+        """
+        awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}' {input}  > {output}
+        """
+
+rule DoubletFinder_results_temp:
+    input:
+        outdir + "/{pool}/DoubletFinder/DoubletFinder_doublets.txt"
+    output:
+        outdir + "/{pool}/CombinedResults/DoubletFinder_temp.txt"
+    resources:
+        mem_per_thread_gb=1,
+        disk_per_thread_gb=1
+    threads: 1
+    shell:
+        """
+        awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}' {input}  > {output}
+        """
+
+rule DoubletDetection_results_temp:
+    input:
+        barcode=outdir + "/{pool}/matrix_out/barcodes.tsv",
+        results=outdir + "/{pool}/DoubletDetection/DoubletDetection_predicted_doublet.txt"
+    output:
+        DoulbetDetection_temp=outdir + "/{pool}/CombinedResults/DoubletDetection_temp.txt"
+    resources:
+        mem_per_thread_gb=1,
+        disk_per_thread_gb=1
+    threads: 1
+    params:
+    shell:
+        """
+        sed "s/0.0/singlet/g" {input.results} | sed "s/1.0/doublet/g" | paste {input.barcode} - | sed "1 i Barcode\tDoubletDetection_DropletType" | awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}' > {output.DoulbetDetection_temp}
+        """
+
+if os.path.exists(outdir + "/DoubletDecon_rhops.tsv"):
+    rule DoubletDecon_results_temp:
+        input:
+            doublets = lambda wildcards: expand(outdir + "/{pool}/DoubletDecon_rhop{rhop}/Final_doublets_groups_DoubletDecon_results.txt", zip, pool = wildcards.pool, rhop = DoubletDecon_decisions.rhop[DoubletDecon_decisions.Pool == wildcards.pool]),
+            singlets = lambda wildcards: expand(outdir + "/{pool}/DoubletDecon_rhop{rhop}/Final_nondoublets_groups_DoubletDecon_results.txt", zip, pool = wildcards.pool, rhop = DoubletDecon_decisions.rhop[DoubletDecon_decisions.Pool == wildcards.pool])
+        output:
+            temp=temp(outdir + "/{pool}/CombinedResults/DoubletDecon_temp_temp.txt"),
+            final=outdir + "/{pool}/CombinedResults/DoubletDecon_temp.txt"
+        resources:
+            mem_per_thread_gb=1,
+            disk_per_thread_gb=1
+        threads: 1
+        shell:
+            """
+            tail -n +2 {input.doublets} | awk '{{print $1}}' | sed 's/\"//g' | sed "s/$/\tdoublet/" | tr "." "-" | sed "1 i Barcode\tDoubletDecon_DropletType" > {output.temp}
+            tail -n +2 {input.singlets} | awk '{{print $1}}' | sed 's/\"//g' | sed "s/$/\tsinglet/" | tr "." "-" >> {output.temp}
+            awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}' {output.temp} > {output.final}
+            """
+
+rule solo_results_temp:
+    input:
+        outdir + "/{pool}/solo/solo_results.txt"
+    output:
+        outdir + "/{pool}/CombinedResults/solo_results_temp.txt"
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 40,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 40
+    threads: 1
+    params:
+        sif=demuxafy_sif,
+    benchmark:
+        outdir + "benchmarks/{pool}.solo_results_temp.txt"
+    shell:
+        """
+        singularity exec {params.sif} awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}' {input} > {output}
+        """ 
+
+rule scDblFinder_results_temp:
+    input:
+        outdir + "/{pool}/scDblFinder/scDblFinder_results.txt"
+    output:
+        outdir + "/{pool}/CombinedResults/scDblFinder_results_temp.txt"
+    resources:
+        mem_per_thread_gb=lambda wildcards, attempt: attempt * 1,
+        disk_per_thread_gb=lambda wildcards, attempt: attempt * 1
+    threads: 1
+    params:
+        sif=demuxafy_sif,
+    benchmark:
+        outdir + "benchmarks/{pool}.scDblFinder_results_temp.txt"
+    shell:
+        """
+        singularity exec {params.sif} awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}' {input} > {output}
+        """ 
+
+
+
+rule join_results:
+    input:
+        demuxlet=outdir + "/{pool}/CombinedResults/demuxlet_temp.txt",
+        freemuxlet=outdir + "/{pool}/CombinedResults/freemuxlet_temp.txt",
+        scSplit=outdir + "/{pool}/CombinedResults/scSplit_temp.txt",
+        souporcell=outdir + "/{pool}/CombinedResults/souporcell_temp.txt",
+        vireo=outdir + "/{pool}/CombinedResults/vireo_temp.txt",
+        dropulation = outdir + "/{pool}/CombinedResults/dropulation_temp.txt",
+        demuxalot = outdir + "/{pool}/CombinedResults/demuxalot_temp.txt",
+        demuxalot_refined = outdir + "/{pool}/CombinedResults/demuxalot_refined_temp.txt",
+        scrublet=outdir + "/{pool}/CombinedResults/scrublet_temp.txt",
+        scds=outdir + "/{pool}/CombinedResults/scds_temp.txt",
+        DoubletDetection=outdir + "/{pool}/CombinedResults/DoubletDetection_temp.txt",
+        DoubletFinder=outdir + "/{pool}/CombinedResults/DoubletFinder_temp.txt",
+        DoubletDecon=outdir + "/{pool}/CombinedResults/DoubletDecon_temp.txt",
+        solo = outdir + "/{pool}/CombinedResults/solo_results_temp.txt",
+        scDblFinder = outdir + "/{pool}/CombinedResults/scDblFinder_results_temp.txt"
+    output:
+        outdir + "/{pool}/CombinedResults/CombinedDropletAssignments.tsv"
+    resources:
+        mem_per_thread_gb=5,
+        disk_per_thread_gb=5
+    threads: 1
+    benchmark:
+        outdir + "benchmarks/{pool}.join_results.txt"
+    shell:
+        """
+         join -a1 -a2 -1 1 -2 1 -t "\t" -e"NA" -o "0,1.2,1.3,1.4,1.5,1.6,1.7,2.2,2.3,2.4,2.5,2.6,2.7" {input.demuxlet} {input.freemuxlet} | awk 'NR<2{{print $0;next}}{{print $0| "sort -k1"}}' | \
+            join -a1 -a2 -1 1 -2 1 -t "\t" -e"NA" -o "0,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,1.10,1.11,1.12,1.13,2.2,2.3" - {input.scSplit} | awk 'NR<2{{print $0;next}}{{print $0| "sort -k1"}}' | \
+            join -a1 -a2 -1 1 -2 1 -t "\t" -e"NA" -o "0,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,1.10,1.11,1.12,1.13,1.14,1.15,2.2,2.3,2.4,2.5" - {input.souporcell} | awk 'NR<2{{print $0;next}}{{print $0| "sort -k1"}}' | \
+            join -a1 -a2 -1 1 -2 1 -t "\t" -e"NA" -o "0,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,1.10,1.11,1.12,1.13,1.14,1.15,1.16,1.17,1.18,1.19,2.2,2.3,2.4,2.5,2.6" - {input.vireo} | sed "s/ /\t/g" | awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}' | \
+            join -a1 -a2 -1 1 -2 1 -e"NA" -o "0,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,1.10,1.11,1.12,1.13,1.14,1.15,1.16,1.17,1.18,1.19,1.20,1.21,1.22,1.23,1.24,2.2,2.3,2.4,2.5,2.6" - {input.dropulation} | sed "s/ /\t/g" | awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}' | \
+            join -a1 -a2 -1 1 -2 1 -e"NA" -o "0,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,1.10,1.11,1.12,1.13,1.14,1.15,1.16,1.17,1.18,1.19,1.20,1.21,1.22,1.23,1.24,1.25,1.26,1.27,1.28,1.29,2.2,2.3" - {input.demuxalot} | sed "s/ /\t/g" | awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}' | \
+            join -a1 -a2 -1 1 -2 1 -e"NA" -o "0,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,1.10,1.11,1.12,1.13,1.14,1.15,1.16,1.17,1.18,1.19,1.20,1.21,1.22,1.23,1.24,1.25,1.26,1.27,1.28,1.29,1.30,1.31,2.2,2.3" - {input.demuxalot_refined} | sed "s/ /\t/g" | awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}' | \
+            join -a1 -a2 -1 1 -2 1 -e"NA" -o "0,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,1.10,1.11,1.12,1.13,1.14,1.15,1.16,1.17,1.18,1.19,1.20,1.21,1.22,1.23,1.24,1.25,1.26,1.27,1.28,1.29,1.30,1.31,1.32,1.33,2.2" - {input.scrublet} | sed "s/ /\t/g" | awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}' | \
+            join -a1 -a2 -1 1 -2 1 -e"NA" -o "0,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,1.10,1.11,1.12,1.13,1.14,1.15,1.16,1.17,1.18,1.19,1.20,1.21,1.22,1.23,1.24,1.25,1.26,1.27,1.28,1.29,1.30,1.31,1.32,1.33,1.34,2.2,2.3" - {input.scds} | sed "s/ /\t/g" | awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}' | \
+            join -a1 -a2 -1 1 -2 1 -e"NA" -o "0,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,1.10,1.11,1.12,1.13,1.14,1.15,1.16,1.17,1.18,1.19,1.20,1.21,1.22,1.23,1.24,1.25,1.26,1.27,1.28,1.29,1.30,1.31,1.32,1.33,1.34,1.35,1.36,2.2" - {input.DoubletDetection} | sed "s/ /\t/g" | awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}' | \
+            join -a1 -a2 -1 1 -2 1 -e"NA" -o "0,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,1.10,1.11,1.12,1.13,1.14,1.15,1.16,1.17,1.18,1.19,1.20,1.21,1.22,1.23,1.24,1.25,1.26,1.27,1.28,1.29,1.30,1.31,1.32,1.33,1.34,1.35,1.36,1.37,2.2,2.3" - {input.DoubletFinder} | sed "s/ /\t/g" | awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}' | \
+            join -a1 -a2 -1 1 -2 1 -e"NA" -o "0,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,1.10,1.11,1.12,1.13,1.14,1.15,1.16,1.17,1.18,1.19,1.20,1.21,1.22,1.23,1.24,1.25,1.26,1.27,1.28,1.29,1.30,1.31,1.32,1.33,1.34,1.35,1.36,1.37,1.38,1.39,2.2" - {input.DoubletDecon} | sed "s/ /\t/g" | awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}' | \
+            join -a1 -a2 -1 1 -2 1 -e"NA" -o "0,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,1.10,1.11,1.12,1.13,1.14,1.15,1.16,1.17,1.18,1.19,1.20,1.21,1.22,1.23,1.24,1.25,1.26,1.27,1.28,1.29,1.30,1.31,1.32,1.33,1.34,1.35,1.36,1.37,1.38,1.39,1.40,2.2,2.3" - {input.solo} | sed "s/ /\t/g" | awk 'NR<2{{print $0;next}}{{print $0| "sort -k1,1"}}' | \
+            join -a1 -a2 -1 1 -2 1 -e"NA" -o "0,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,1.10,1.11,1.12,1.13,1.14,1.15,1.16,1.17,1.18,1.19,1.20,1.21,1.22,1.23,1.24,1.25,1.26,1.27,1.28,1.29,1.30,1.31,1.32,1.33,1.34,1.35,1.36,1.37,1.38,1.39,1.40,1.41,1.42,2.2,2.3" - {input.scDblFinder} | sed "s/ /\t/g" > {output}
+        """
+
+
+#####################################
+############ SUBSET VCFS ############
+#####################################
+
+### Subset vcfs based on individuals in each pool and locations in cluster-level vcfs
+rule freemuxlet_pool_vcf:
+    input:
+        genotypes= SNP_GENOTYPES + ".gz",
+        cluster_geno=outdir + "/{pool}/popscle/freemuxlet/freemuxletOUT.clust1.vcf.gz"
+    output:
+        outdir + "/{pool}/popscle/freemuxlet/Individual_genotypes_subset.vcf.gz"
+    resources:
+        mem_per_thread_gb=5,
+        disk_per_thread_gb=5
+    threads: 1
+    params:
+        sif=demuxafy_sif,
+        individuals=lambda wildcards: samples.Individuals[samples.Pool == wildcards.pool].iloc[0],
+    shell:
+        "singularity exec {params.sif} bcftools view -s {params.individuals} -R {input.cluster_geno} -Oz -o {output} {input.genotypes}"
+
+rule scSplit_pool_vcf:
+    input:
+        genotypes = SNP_GENOTYPES + ".gz",
+        cluster_geno=outdir + "/{pool}/scSplit/scSplit.vcf"
+    output:
+        outdir + "/{pool}/scSplit/Individual_genotypes_subset.vcf.gz"
+    resources:
+        mem_per_thread_gb=5,
+        disk_per_thread_gb=5
+    threads: 1
+    params:
+        sif=demuxafy_sif,
+        individuals=lambda wildcards: samples.Individuals[samples.Pool == wildcards.pool].iloc[0]
+    shell:
+        "singularity exec {params.sif} bcftools view -s {params.individuals} -R {input.cluster_geno} -Oz -o {output} {input.genotypes}"
+
+rule souporcell_pool_vcf:
+    input:
+        genotypes = SNP_GENOTYPES + ".gz",
+        cluster_geno=outdir + "/{pool}/souporcell/cluster_genotypes.vcf"
+    output:
+        outdir + "/{pool}/souporcell/Individual_genotypes_subset.vcf.gz"
+    resources:
+        mem_per_thread_gb=5,
+        disk_per_thread_gb=5
+    threads: 1
+    params:
+        sif=demuxafy_sif,
+        individuals=lambda wildcards: samples.Individuals[samples.Pool == wildcards.pool].iloc[0]
+    shell:
+        "singularity exec {params.sif} bcftools view -s {params.individuals} -R {input.cluster_geno} -Oz -o {output} {input.genotypes}"

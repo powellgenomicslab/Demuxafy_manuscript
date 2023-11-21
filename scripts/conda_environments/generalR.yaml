@@ -1,0 +1,24 @@
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - r_base==4.2.2
+  - r-tidyverse==1.3.2
+  - r-data.table==1.14.6
+  - r-tidyr==1.2.1
+  - r-dplyr==1.0.10
+  - r-ggplot2==3.4.0
+  - bioconductor-complexheatmap==2.14.0
+  - r-circlize==0.4.15 
+  - r-ggpubr==0.6.0
+  - r-viridis==0.5.1
+  - r-ggnewscale==0.4.9
+  - r-rcolorbrewer==1.1_3 
+  - r-knitr==1.45
+  - r-future.apply==1.11.0
+  - r-plyr==2.3.0
+  - scales==1.2.1
+  - ggforce==0.4.1
+  - argparse==2.2.2
+  - r-stringi==1.7.12
