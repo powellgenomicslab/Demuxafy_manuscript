@@ -123,10 +123,9 @@ rule chord_metrics:
     params:
         q = "-q short.q",
         outdir = outdir + "/{pool}/chord/",
-        script = tool_scripts + "../simulated/simulation/chord_metrics.R"
-    conda:
-        simulation_scripts_dir + "/../../../conda_environments/generalR.yaml"
+        script = tool_scripts + "../simulated/simulation/chord_metrics.R",
+        sif = tool_scripts + "../../files/chord.sif",
     shell:
         """
-        Rscript {params.script} -o {params.outdir} -p {wildcards.pool}
+        singularity exec {parama.sif} Rscript {params.script} -o {params.outdir} -p {wildcards.pool}
         """
